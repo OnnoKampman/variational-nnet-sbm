@@ -207,8 +207,9 @@ class SbmNNetMF:
 
 
 
-    def train(self, N, row, col, T, n_features, hidden_layer_sizes, n_iterations, batch_size,
-              n_samples, holdout_ratio, learning_rate, root_savedir, root_logdir, no_train_metric=False, seed=None, debug=False):
+    def train(self, N, row, col, T, n_features, hidden_layer_sizes,
+              n_iterations, batch_size, n_samples, holdout_ratio, learning_rate,
+              root_savedir, root_logdir, no_train_metric=False, seed=None, debug=False):
 
         """
         Training routine.
@@ -483,8 +484,6 @@ class SbmNNetMF:
         self.qZ_[mbatch_row, :] = Z_probs
 
 
-
-
 if __name__=='__main__':
 
     N = 50
@@ -493,7 +492,7 @@ if __name__=='__main__':
     from scipy.sparse import find
     row, col, _ = find(X)
 
-    root_savedir = "/Users/Koa/github-repos/bayes-nnet-mf/saved_sbm"
+    root_savedir = "~/git_repos/bayes-nnet/saved_sbm"
     root_logdir = os.path.join(root_savedir, 'tf_logs')
 
     if os.path.exists(root_logdir):
@@ -505,8 +504,8 @@ if __name__=='__main__':
 
 
     m = SbmNNetMF()
-    m.train(N, row, col, T=T, n_features=n_features, hidden_layer_sizes=hidden_layer_sizes, n_iterations=100, batch_size=50,
-            n_samples=6, holdout_ratio=0.1, learning_rate=0.01, root_savedir=root_savedir, root_logdir=root_logdir,
-            no_train_metric=False, seed=None, debug=False)
+    m.train(N, row, col, T=T, n_features=n_features, hidden_layer_sizes=hidden_layer_sizes,
+            n_iterations=100, batch_size=50, n_samples=6, holdout_ratio=0.1, learning_rate=0.01,
+            root_savedir=root_savedir, root_logdir=root_logdir, no_train_metric=False, seed=None, debug=False)
 
     os.system('~/anaconda3/bin/tensorboard --logdir=' + root_logdir)
