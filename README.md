@@ -1,3 +1,3 @@
-# bayes-nnet-mf
+# bayes-nnet
 
-Bayesian implementations of neural network based models.
+Bayesian neural network models. Work in progress.
