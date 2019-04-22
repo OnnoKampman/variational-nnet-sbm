@@ -16,7 +16,6 @@ class SbmNNetMF:
         Base class for a model for binary symmetric link matrices with blockmodel structure.
         """
 
-
     def construct_graph(self):
 
         N = self.N  # number of nodes
@@ -24,11 +23,7 @@ class SbmNNetMF:
         n_features = self.n_features
         hidden_layer_sizes = self.hidden_layer_sizes
 
-
-        #######################################################
-        ###  List all placeholders here for easy reference  ###
-        #######################################################
-
+        # List all placeholders here for easy reference.
         self.row = tf.placeholder(dtype=tf.int32, shape=[None])
         self.col = tf.placeholder(dtype=tf.int32, shape=[None])
         self.val = tf.placeholder(dtype=tf.int32, shape=[None])
@@ -42,11 +37,7 @@ class SbmNNetMF:
 
         self.sum_qZ_above = tf.placeholder(dtype=tf.float32, shape=[N, T - 1], name='sum_qZ_above')
 
-
-        #############################################
-        ###  Create the features and nnet inputs  ###
-        #############################################
-
+        # Create the features and nnet inputs.
         init_scale = - 4.6  # initial scale of inv_softplus(sigma), for noise std devs sigma; -4.6 maps to 0.01 under softplus
 
         # the node-specific features are vectors drawn from a cluster specific distribution
@@ -54,13 +45,19 @@ class SbmNNetMF:
         self.pU_dist = ds.Normal(loc=tf.Variable(tf.random_normal([n_features]), name='pU_mean'),
                                  scale=tf.nn.softplus(tf.Variable(tf.ones([n_features]) * init_scale, name='pU_std_unc')),
                                  name='pU_dist')
-
         self.qU_dist = ds.Normal(loc=tf.Variable(tf.random_normal([T, n_features]), name='qU_mean'),
                                  scale=tf.nn.softplus(tf.Variable(tf.ones([T, n_features]) * init_scale, name='qU_std_unc')),
                                  name='qU_dist')
 
-        qU_samps = self.qU_dist.sample(self.n_samples)  # (n_samples, T, n_features)
+        self.pUp_dist = ds.Normal(loc=tf.Variable(tf.random_normal([self.d_pairwise]), name='pU_mean'),
+                                  scale=tf.nn.softplus(tf.Variable(tf.ones([self.d_pairwise]) * init_scale, name='pUp_std_unc')),
+                                  name='pUp_dist')
+        self.qUp_dist = ds.Normal(loc=tf.Variable(tf.random_normal([T, self.d_pairwise], stddev=0.01), name='qUp_mean'),
+                                  scale=tf.nn.softplus(tf.Variable(tf.ones([T, self.d_pairwise]) * init_scale, name='qUp_std_unc')),
+                                  name='qUp_dist')
 
+        qU_samps = self.qU_dist.sample(self.n_samples)  # (n_samples, T, n_features)
+        qUp_samps = self.qUp_dist.sample(self.n_samples)  # (n_samples, T, d_pairwise)
 
         # We must integrate w.r.t. qZ, which requires an eventual sum over all possible combinations of q(Z_i), q(Z_j),
         # for each (i, j) in the minibatch. But this requires us to compute the likelihood for each possible Z_i, Z_j.
@@ -75,11 +72,7 @@ class SbmNNetMF:
                              col_features
                              ], axis=2)  # (n_samples, n_T_pairs, n_inputs)
 
-
-        ###################################
-        ###  Create the neural network  ###
-        ###################################
-
+        # Create the neural network.
         # all weights share a prior under p
         self.pW_dist = ds.Normal(loc=tf.Variable(tf.random_normal([1]), name='pW_mean'),
                                  scale=tf.nn.softplus(tf.Variable(init_scale, name='pW_std_unc')),
@@ -198,19 +191,14 @@ class SbmNNetMF:
                                                 + (self.qV_shp1 - 1.0) * self.E_log_V + (self.qV_shp2 - 1.0) * self.E_log_1mV
                                             )  # a scalar
 
-        ###########################
-        ###  Assemble the ELBO  ###
-        ###########################
-
+        # Assemble the ELBO.
         self.data_loglikel = tf.reduce_sum(loglikel) / tf.cast(self.n_samples, tf.float32)  # will be recorded
         self.elbo = self.batch_scale * self.data_loglikel - kl_divergence
 
-
-
-    def train(self, N, row, col, T, n_features, hidden_layer_sizes,
+    def train(self, N, row, col, T,
+              n_features, d_pairwise, hidden_layer_sizes,
               n_iterations, batch_size, n_samples, holdout_ratio, learning_rate,
-              root_savedir, root_logdir, no_train_metric=False, seed=None, debug=False):
-
+              root_savedir, no_train_metric=False, seed=None, debug=False):
         """
         Training routine.
 
@@ -232,24 +220,21 @@ class SbmNNetMF:
         :param holdout_ratio:
         :param learning_rate:
         :param root_savedir:
-        :param root_logdir:
         :param no_train_metric:
         :param seed:
         :param debug:
         :return:
         """
-
         self.N = N
         self.T = T
         self.n_features = n_features
+        self.d_pairwise = d_pairwise
         self.hidden_layer_sizes = hidden_layer_sizes
 
         if not os.path.exists(root_savedir):
             os.makedirs(root_savedir)
 
-
-        ###  Data handling  ###
-
+        # Data handling.
         X_sp = sp.csr_matrix((np.ones(len(row)), (row, col)), shape=[N, N])
         X_sp = X_sp + X_sp.transpose()
         X_sp = sp.triu(X_sp, k=1)
@@ -260,15 +245,12 @@ class SbmNNetMF:
 
         batch_generator = BatchGenerator(pairs, batch_size, holdout_ratio=holdout_ratio, seed=seed)
 
-
-        ###  Construct the TF graph  ###
-
+        # Construct the TF graph.
         self.construct_graph()
 
         print("Trainable variables:", tf.trainable_variables())
 
         train_op = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(-self.elbo)
-
 
         ###  Create q(Z) variational parameters  ###
 
@@ -281,9 +263,7 @@ class SbmNNetMF:
         for k in range(T - 1):
             sum_qZ_above[:, k] = np.sum(self.qZ_[:, k + 1:], axis=1)
 
-
-        ###  Training  ###
-
+        # Training.
         if not no_train_metric:
             train_elbo = tf.placeholder(dtype=tf.float32, shape=[], name='train_elbo')
             train_elbo_summary = tf.summary.scalar('train_elbo', train_elbo)
@@ -306,7 +286,6 @@ class SbmNNetMF:
         init = tf.global_variables_initializer()
 
         with tf.Session() as sess:
-
             init.run()
 
             if not no_train_metric:
@@ -343,7 +322,6 @@ class SbmNNetMF:
                 # analytically
                 self.update_qZ(sess=sess, batch=batch, n_samples=n_samples, debug=debug)
 
-
                 # this update to sum_qZ_above was done at the beginning of the iteration. this implementation updates the sum_qZ_above before
                 # logging the intermediate loss functions, and also one more time before saving the model. this actually makes more sense to me.
                 # we could also just add this computation inside the construct graph function? it would have to be recomputed a few times more, but makes the code cleaner
@@ -379,16 +357,13 @@ class SbmNNetMF:
                         writer.add_summary(test_ll_summary_str, iteration)
                         print("\tTest LL: %.4f" % test_ll_)
 
-
             # save the model
             saver.save(sess, os.path.join(root_savedir, "model.ckpt"))
 
         # close the file writer
         writer.close()
 
-
     def update_qZ(self, sess, batch, n_samples, debug=False):
-
         """
         Analytically update the variational parameters of the distribution on the DP indicators Z.
 
@@ -399,7 +374,6 @@ class SbmNNetMF:
         :param debug:
         :return:
         """
-
         N, T = self.qZ_.shape
 
         # grab the values needed to update qZ
@@ -484,28 +458,25 @@ class SbmNNetMF:
         self.qZ_[mbatch_row, :] = Z_probs
 
 
-if __name__=='__main__':
+if __name__ == '__main__':
 
     N = 50
-    X = np.random.rand(N,N)<0.4
+    X = np.random.rand(N, N) < 0.4
 
     from scipy.sparse import find
     row, col, _ = find(X)
 
-    root_savedir = "~/git_repos/bayes-nnet/saved_sbm"
-    root_logdir = os.path.join(root_savedir, 'tf_logs')
+    root_savedir = "~/git_repos/variational-nnet-sbm/saved_sbm"
 
-    if os.path.exists(root_logdir):
-        shutil.rmtree(root_logdir)
-
-    T = 10
+    T = 7
     n_features = 8
+    d_pairwise = 16
     hidden_layer_sizes = [12, 8]
 
-
     m = SbmNNetMF()
-    m.train(N, row, col, T=T, n_features=n_features, hidden_layer_sizes=hidden_layer_sizes,
+    m.train(N, row, col, T=T,
+            n_features=n_features, d_pairwise=d_pairwise, hidden_layer_sizes=hidden_layer_sizes,
             n_iterations=100, batch_size=50, n_samples=6, holdout_ratio=0.1, learning_rate=0.01,
-            root_savedir=root_savedir, root_logdir=root_logdir, no_train_metric=False, seed=None, debug=False)
+            root_savedir=root_savedir, no_train_metric=False, seed=None, debug=False)
 
-    os.system('~/anaconda3/bin/tensorboard --logdir=' + root_logdir)
+    os.system('~/anaconda3/bin/tensorboard --logdir=' + root_savedir)

@@ -1,3 +1,5 @@
-# bayes-nnet
+# variational-nnet-sbm
 
-Bayesian neural network models. Work in progress.
+Variational inference in a neural network stochastic blockmodel. 
+
+Work in progress.

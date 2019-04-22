@@ -1,6 +1,7 @@
 import numpy as np
 from itertools import combinations
 
+
 class BatchGenerator(object):
 
     def __init__(self, pairs, batch_size=None, holdout_ratio=0.1, seed=None):
@@ -31,7 +32,6 @@ class BatchGenerator(object):
             print("Train/test split: {}/{}".format(len(self.train), len(self.test)))
 
         print("Batch size {} results in {} training batches.".format(batch_size, self.num_train_batches))
-
 
     def get_idx(self, is_train):
         if is_train:
@@ -91,6 +91,7 @@ def log_gaussian_density(x, mu, L):
 
 
 from itertools import combinations
+
 def get_pairs(N, row, col):
 
     # enumerates all edges of the upper triangle
