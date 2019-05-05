@@ -9,7 +9,7 @@ from scipy.misc import logsumexp
 from utils import BatchGenerator, get_pairs, log_gaussian_density
 
 
-class SbmNNetMF:
+class NNetSBM:
 
     def __init__(self):
         """
@@ -39,25 +39,27 @@ class SbmNNetMF:
 
         # Create the features and nnet inputs.
         init_scale = - 4.6  # initial scale of inv_softplus(sigma), for noise std devs sigma; -4.6 maps to 0.01 under softplus
+        var_std = 0.01
 
-        # the node-specific features are vectors drawn from a cluster specific distribution
-        # make the prior distributions for each cluster
-        self.pU_dist = ds.Normal(loc=tf.Variable(tf.random_normal([n_features]), name='pU_mean'),
-                                 scale=tf.nn.softplus(tf.Variable(tf.ones([n_features]) * init_scale, name='pU_std_unc')),
-                                 name='pU_dist')
-        self.qU_dist = ds.Normal(loc=tf.Variable(tf.random_normal([T, n_features]), name='qU_mean'),
-                                 scale=tf.nn.softplus(tf.Variable(tf.ones([T, n_features]) * init_scale, name='qU_std_unc')),
-                                 name='qU_dist')
+        with tf.name_scope("latent_features"):
+            # the node-specific features are vectors drawn from a cluster specific distribution
+            # make the prior distributions for each cluster
+            self.pU_dist = ds.Normal(loc=tf.Variable(tf.random_normal([n_features], stddev=var_std), name='pU_mean'),
+                                     scale=tf.nn.softplus(tf.Variable(tf.ones([n_features]) * init_scale, name='pU_std_unc')),
+                                     name='pU_dist')
+            self.qU_dist = ds.Normal(loc=tf.Variable(tf.random_normal([T, n_features], stddev=var_std), name='qU_mean'),
+                                     scale=tf.nn.softplus(tf.Variable(tf.ones([T, n_features]) * init_scale, name='qU_std_unc')),
+                                     name='qU_dist')
 
-        self.pUp_dist = ds.Normal(loc=tf.Variable(tf.random_normal([self.d_pairwise]), name='pU_mean'),
-                                  scale=tf.nn.softplus(tf.Variable(tf.ones([self.d_pairwise]) * init_scale, name='pUp_std_unc')),
-                                  name='pUp_dist')
-        self.qUp_dist = ds.Normal(loc=tf.Variable(tf.random_normal([T, self.d_pairwise], stddev=0.01), name='qUp_mean'),
-                                  scale=tf.nn.softplus(tf.Variable(tf.ones([T, self.d_pairwise]) * init_scale, name='qUp_std_unc')),
-                                  name='qUp_dist')
+            self.pUp_dist = ds.Normal(loc=tf.Variable(tf.random_normal([self.d_pairwise], stddev=var_std), name='pU_mean'),
+                                      scale=tf.nn.softplus(tf.Variable(tf.ones([self.d_pairwise]) * init_scale, name='pUp_std_unc')),
+                                      name='pUp_dist')
+            self.qUp_dist = ds.Normal(loc=tf.Variable(tf.random_normal([T, self.d_pairwise], stddev=var_std), name='qUp_mean'),
+                                      scale=tf.nn.softplus(tf.Variable(tf.ones([T, self.d_pairwise]) * init_scale, name='qUp_std_unc')),
+                                      name='qUp_dist')
 
-        qU_samps = self.qU_dist.sample(self.n_samples)  # (n_samples, T, n_features)
-        qUp_samps = self.qUp_dist.sample(self.n_samples)  # (n_samples, T, d_pairwise)
+            qU_samps = self.qU_dist.sample(self.n_samples)  # (n_samples, T, n_features)
+            qUp_samps = self.qUp_dist.sample(self.n_samples)  # (n_samples, T, d_pairwise)
 
         # We must integrate w.r.t. qZ, which requires an eventual sum over all possible combinations of q(Z_i), q(Z_j),
         # for each (i, j) in the minibatch. But this requires us to compute the likelihood for each possible Z_i, Z_j.
@@ -114,7 +116,6 @@ class SbmNNetMF:
                 # store the distribution objects, but we won't need the samples
                 self.nnet_tensors.append((qW_dist, qB_dist))
 
-
         # the output layer mapping to a single probability of a link
         qW_dist = ds.Normal(loc=tf.Variable(tf.random_normal([n_inputs, 1]), name='qW_out_mean'),
                             scale=tf.nn.softplus(tf.Variable(tf.ones([n_inputs, 1]) * init_scale, name='qW_out_std_unc')),
@@ -132,11 +133,7 @@ class SbmNNetMF:
         # inputs_ is (n_samples, n_T_pairs, final_layer_size)
         logits = tf.matmul(inputs_, W_samps) + B_samps[:, None, :]  # (n_samples, n_T_pairs, 1)
 
-
-        ################################
-        ###  Compute the likelihood  ###
-        ################################
-
+        # Compute the likelihood.
         # cross entropy is negative Bernoulli log-likelihood
         n_T_pairs = all_T_pairs.shape[1]
         batch_size = tf.shape(self.val)[0]
@@ -155,36 +152,25 @@ class SbmNNetMF:
 
         loglikel = tf.einsum('jk,ijk->ij', qZ_pairs_row * qZ_pairs_col, self.log_bernoulli_likel)  # (n_samples, batch_size); presumably faster than tile->matmul
 
-
-        ##############################
-        ###  Compute the KL terms  ###
-        ##############################
-
+        # Compute the KL terms.
         kl_divergence = tf.constant(0.0)  # will broadcast up
-
         # KL terms of U (analytically evaluated)
         kl_divergence += tf.reduce_sum(self.qU_dist.kl_divergence(self.pU_dist))  # scalar
-
         # nnet weights and biases
         for qW_dist, qB_dist in self.nnet_tensors:  # will have at least one entry
             kl_divergence += tf.reduce_sum(qW_dist.kl_divergence(self.pW_dist))  # scalar
             kl_divergence += tf.reduce_sum(qB_dist.kl_divergence(self.pB_dist))  # scalar
-
         # KL terms for the DP sticks V; V can be analytically updated but we'll prefer to do gradient updates
         self.dp_conc = tf.nn.softplus(tf.Variable(3.5, name='dp_conc_unc'))  # 3.5 maps to 3.0 under softplus
-
         self.qV_shp1 = tf.nn.softplus(tf.Variable(tf.ones(T - 1) * 0.54, name='qV_shp1'))  # 0.54 maps to 1.0 under softplus
         self.qV_shp2 = tf.nn.softplus(tf.Variable(tf.ones(T - 1) * 0.54, name='qV_shp2'))
-
         digamma_sum = tf.digamma(self.qV_shp1 + self.qV_shp2)
         self.E_log_V = tf.digamma(self.qV_shp1) - digamma_sum  # (T-1,)
         self.E_log_1mV = tf.digamma(self.qV_shp2) - digamma_sum
-
         # KL terms for E[log p(Z|V)] with V integrated out (verified this, it's correct)
         # note KL divergence is E_q [logq / logp]
         kl_divergence += - tf.reduce_sum(self.sum_qZ_above * self.E_log_1mV + self.qZ[:, :-1] * self.E_log_V) \
                             + tf.reduce_sum(self.qZ * tf.log(self.qZ))
-        
         # elbo terms for E[log p(V|c)]
         kl_divergence += - tf.log(self.dp_conc) + (self.dp_conc - 1.0) * tf.reduce_sum(self.E_log_1mV) \
                             + tf.reduce_sum( tf.lgamma(self.qV_shp1 + self.qV_shp2) - tf.lgamma(self.qV_shp1) - tf.lgamma(self.qV_shp2)
@@ -192,8 +178,9 @@ class SbmNNetMF:
                                             )  # a scalar
 
         # Assemble the ELBO.
-        self.data_loglikel = tf.reduce_sum(loglikel) / tf.cast(self.n_samples, tf.float32)  # will be recorded
-        self.elbo = self.batch_scale * self.data_loglikel - kl_divergence
+        with tf.name_scope("ELBO"):
+            self.data_loglikel = tf.reduce_sum(loglikel) / tf.cast(self.n_samples, tf.float32)  # will be recorded
+            self.elbo = self.batch_scale * self.data_loglikel - kl_divergence
 
     def train(self, N, row, col, T,
               n_features, d_pairwise, hidden_layer_sizes,
@@ -473,7 +460,7 @@ if __name__ == '__main__':
     d_pairwise = 16
     hidden_layer_sizes = [12, 8]
 
-    m = SbmNNetMF()
+    m = NNetSBM()
     m.train(N, row, col, T=T,
             n_features=n_features, d_pairwise=d_pairwise, hidden_layer_sizes=hidden_layer_sizes,
             n_iterations=100, batch_size=50, n_samples=6, holdout_ratio=0.1, learning_rate=0.01,
