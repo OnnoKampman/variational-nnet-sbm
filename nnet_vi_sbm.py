@@ -154,12 +154,16 @@ class NNetSBM:
 
         # Compute the KL terms.
         kl_divergence = tf.constant(0.0)  # will broadcast up
+
         # KL terms of U (analytically evaluated)
-        kl_divergence += tf.reduce_sum(self.qU_dist.kl_divergence(self.pU_dist))  # scalar
+        kl_divergence += tf.reduce_sum(self.qU_dist.kl_divergence(self.pU_dist))
+        kl_divergence += tf.reduce_sum(self.qUp_dist.kl_divergence(self.pUp_dist))
+
         # nnet weights and biases
         for qW_dist, qB_dist in self.nnet_tensors:  # will have at least one entry
             kl_divergence += tf.reduce_sum(qW_dist.kl_divergence(self.pW_dist))  # scalar
             kl_divergence += tf.reduce_sum(qB_dist.kl_divergence(self.pB_dist))  # scalar
+
         # KL terms for the DP sticks V; V can be analytically updated but we'll prefer to do gradient updates
         self.dp_conc = tf.nn.softplus(tf.Variable(3.5, name='dp_conc_unc'))  # 3.5 maps to 3.0 under softplus
         self.qV_shp1 = tf.nn.softplus(tf.Variable(tf.ones(T - 1) * 0.54, name='qV_shp1'))  # 0.54 maps to 1.0 under softplus
@@ -171,6 +175,7 @@ class NNetSBM:
         # note KL divergence is E_q [logq / logp]
         kl_divergence += - tf.reduce_sum(self.sum_qZ_above * self.E_log_1mV + self.qZ[:, :-1] * self.E_log_V) \
                             + tf.reduce_sum(self.qZ * tf.log(self.qZ))
+
         # elbo terms for E[log p(V|c)]
         kl_divergence += - tf.log(self.dp_conc) + (self.dp_conc - 1.0) * tf.reduce_sum(self.E_log_1mV) \
                             + tf.reduce_sum( tf.lgamma(self.qV_shp1 + self.qV_shp2) - tf.lgamma(self.qV_shp1) - tf.lgamma(self.qV_shp2)
