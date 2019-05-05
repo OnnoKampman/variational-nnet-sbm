@@ -1,10 +1,12 @@
-import os
-import shutil
-import tensorflow as tf
-import tensorflow.contrib.distributions as ds
+import logging
 import numpy as np
+import os
+from pprint import pprint
 import scipy.sparse as sp
 from scipy.misc import logsumexp
+import tensorflow as tf
+import tensorflow.contrib.distributions as ds
+tf.logging.set_verbosity(tf.logging.WARN)
 
 from utils import BatchGenerator, get_pairs, log_gaussian_density
 
@@ -24,10 +26,9 @@ class NNetSBM:
         hidden_layer_sizes = self.hidden_layer_sizes
 
         # List all placeholders here for easy reference.
-        self.row = tf.placeholder(dtype=tf.int32, shape=[None])
-        self.col = tf.placeholder(dtype=tf.int32, shape=[None])
-        self.val = tf.placeholder(dtype=tf.int32, shape=[None])
-
+        self.row = tf.placeholder(dtype=tf.int32, shape=[None], name="row")  # i.e. user 1
+        self.col = tf.placeholder(dtype=tf.int32, shape=[None], name="col")  # i.e. user 2
+        self.val = tf.placeholder(dtype=tf.int32, shape=[None], name="val")  # i.e. link
         self.batch_scale = tf.placeholder(dtype=tf.float32, shape=[], name='batch_scale')
         self.n_samples = tf.placeholder(dtype=tf.int32, shape=[], name='n_samples')
 
@@ -51,11 +52,11 @@ class NNetSBM:
                                      scale=tf.nn.softplus(tf.Variable(tf.ones([T, n_features]) * init_scale, name='qU_std_unc')),
                                      name='qU_dist')
 
-            self.pUp_dist = ds.Normal(loc=tf.Variable(tf.random_normal([self.d_pairwise], stddev=var_std), name='pU_mean'),
-                                      scale=tf.nn.softplus(tf.Variable(tf.ones([self.d_pairwise]) * init_scale, name='pUp_std_unc')),
+            self.pUp_dist = ds.Normal(loc=tf.Variable(tf.random_normal([self.n_pairwise_features], stddev=var_std), name='pU_mean'),
+                                      scale=tf.nn.softplus(tf.Variable(tf.ones([self.n_pairwise_features]) * init_scale, name='pUp_std_unc')),
                                       name='pUp_dist')
-            self.qUp_dist = ds.Normal(loc=tf.Variable(tf.random_normal([T, self.d_pairwise], stddev=var_std), name='qUp_mean'),
-                                      scale=tf.nn.softplus(tf.Variable(tf.ones([T, self.d_pairwise]) * init_scale, name='qUp_std_unc')),
+            self.qUp_dist = ds.Normal(loc=tf.Variable(tf.random_normal([T, self.n_pairwise_features], stddev=var_std), name='qUp_mean'),
+                                      scale=tf.nn.softplus(tf.Variable(tf.ones([T, self.n_pairwise_features]) * init_scale, name='qUp_std_unc')),
                                       name='qUp_dist')
 
             qU_samps = self.qU_dist.sample(self.n_samples)  # (n_samples, T, n_features)
@@ -69,9 +70,11 @@ class NNetSBM:
 
         row_features = tf.gather(qU_samps, indices=all_T_pairs[0], axis=1)  # (n_samples, n_T_pairs, n_features)
         col_features = tf.gather(qU_samps, indices=all_T_pairs[1], axis=1)
-
+        pairwise_features = tf.multiply(tf.gather(qUp_samps, indices=all_T_pairs[0], axis=1),
+                                        tf.gather(qUp_samps, indices=all_T_pairs[1], axis=1))
         inputs_ = tf.concat([row_features,
-                             col_features
+                             col_features,
+                             pairwise_features
                              ], axis=2)  # (n_samples, n_T_pairs, n_inputs)
 
         # Create the neural network.
@@ -93,15 +96,13 @@ class NNetSBM:
         n_inputs = tf.cast(inputs_.shape[-1], tf.int32)
         for layer_i, layer_size in enumerate(hidden_layer_sizes):  # if an empty list then this loop is not entered
             
-            with tf.name_scope("NN_layer_%d" % layer_i):
+            with tf.name_scope("NNet_layer_%d" % layer_i):
 
-                # the p and q distributions for this layer's weights
-                qW_dist = ds.Normal(loc=tf.Variable(tf.random_normal([n_inputs, layer_size]), name='qW_layer_mean'),
+                # the p and q distributions for this layer's weights and biases
+                qW_dist = ds.Normal(loc=tf.Variable(tf.random_normal([n_inputs, layer_size], stddev=var_std), name='qW_layer_mean'),
                                     scale=tf.nn.softplus(tf.Variable(tf.ones([n_inputs, layer_size]) * init_scale, name='qW_layer_std_unc')),
                                     name='qW_layer_dist')
-
-                # biases
-                qB_dist = ds.Normal(loc=tf.Variable(tf.random_normal([layer_size]), name='qB_mean'),
+                qB_dist = ds.Normal(loc=tf.Variable(tf.random_normal([layer_size], stddev=var_std), name='qB_mean'),
                                     scale=tf.nn.softplus(tf.Variable(tf.ones([layer_size]) * init_scale, name='qB_std_unc')),
                                     name='qB_dist')
 
@@ -117,11 +118,10 @@ class NNetSBM:
                 self.nnet_tensors.append((qW_dist, qB_dist))
 
         # the output layer mapping to a single probability of a link
-        qW_dist = ds.Normal(loc=tf.Variable(tf.random_normal([n_inputs, 1]), name='qW_out_mean'),
+        qW_dist = ds.Normal(loc=tf.Variable(tf.random_normal([n_inputs, 1], stddev=var_std), name='qW_out_mean'),
                             scale=tf.nn.softplus(tf.Variable(tf.ones([n_inputs, 1]) * init_scale, name='qW_out_std_unc')),
                             name='qW_out_dist')
-
-        qB_dist = ds.Normal(loc=tf.Variable(tf.random_normal([1]), name='qB_out_mean'),
+        qB_dist = ds.Normal(loc=tf.Variable(tf.random_normal([1], stddev=var_std), name='qB_out_mean'),
                             scale=tf.nn.softplus(tf.Variable(init_scale, name='qB_out_std_unc')),
                             name='qB_out_dist')
 
@@ -188,9 +188,11 @@ class NNetSBM:
             self.elbo = self.batch_scale * self.data_loglikel - kl_divergence
 
     def train(self, N, row, col, T,
-              n_features, d_pairwise, hidden_layer_sizes,
-              n_iterations, batch_size, n_samples, holdout_ratio, learning_rate,
-              root_savedir, no_train_metric=False, seed=None, debug=False):
+              n_features, n_pairwise_features,
+              hidden_layer_sizes,
+              n_iterations, batch_size, n_samples, holdout_ratio_valid, learning_rate,
+              root_savedir,
+              log_interval=10, no_train_metric=False, seed=None, debug=False):
         """
         Training routine.
 
@@ -209,7 +211,7 @@ class NNetSBM:
         :param batch_size: HALF the minibatch size. In particular, we will always add the symmetric entry in the graph
             (i.e., the corresponding entry in the lower triangle) in the minibatch.
         :param n_samples:
-        :param holdout_ratio:
+        :param holdout_ratio_valid:
         :param learning_rate:
         :param root_savedir:
         :param no_train_metric:
@@ -220,7 +222,7 @@ class NNetSBM:
         self.N = N
         self.T = T
         self.n_features = n_features
-        self.d_pairwise = d_pairwise
+        self.n_pairwise_features = n_pairwise_features
         self.hidden_layer_sizes = hidden_layer_sizes
 
         if not os.path.exists(root_savedir):
@@ -235,12 +237,15 @@ class NNetSBM:
         pairs = get_pairs(N, row, col)
         pairs = pairs.astype(int)
 
-        batch_generator = BatchGenerator(pairs, batch_size, holdout_ratio=holdout_ratio, seed=seed)
+        batch_generator = BatchGenerator(pairs, batch_size,
+                                         holdout_ratio=holdout_ratio_valid,
+                                         seed=seed)
 
         # Construct the TF graph.
         self.construct_graph()
-
-        print("Trainable variables:", tf.trainable_variables())
+        all_vars = tf.trainable_variables()
+        print("\nTrainable variables:")
+        pprint([var_.name for var_ in all_vars])
 
         train_op = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(-self.elbo)
 
@@ -263,7 +268,7 @@ class NNetSBM:
             train_ll = tf.placeholder(dtype=tf.float32, shape=[], name='train_ll')
             train_ll_summary = tf.summary.scalar('train_ll', train_ll)
 
-        if holdout_ratio is not None:
+        if holdout_ratio_valid is not None:
             test_ll = tf.placeholder(dtype=tf.float32, shape=[], name='test_ll')
             test_ll_summary = tf.summary.scalar('test_ll', test_ll)
         
@@ -272,6 +277,7 @@ class NNetSBM:
         scalar_summaries = [tf.summary.scalar(tensor_.name, tensor_) for tensor_ in trainable_vars if len(tensor_.shape) == 0]
         tensor_summaries = [tf.summary.histogram(tensor_.name, tensor_) for tensor_ in trainable_vars if len(tensor_.shape) > 0]
 
+        root_logdir = os.path.join(root_savedir, "tf_logs")
         writer = tf.summary.FileWriter(root_logdir)
 
         saver = tf.train.Saver()
@@ -289,13 +295,14 @@ class NNetSBM:
                 val = np.concatenate([train_data[:, 2], train_data[:, 2]])
                 train_dict = {self.row: row, self.col: col, self.val: val, self.batch_scale: 1.0}
 
-            if holdout_ratio is not None:
+            if holdout_ratio_valid is not None:
                 test_data = batch_generator.test
                 row = np.concatenate([test_data[:, 0], test_data[:, 1]])
                 col = np.concatenate([test_data[:, 1], test_data[:, 0]])
                 val = np.concatenate([test_data[:, 2], test_data[:, 2]])
                 test_dict = {self.row: row, self.col: col, self.val: val, self.batch_scale: 1.0}
 
+            logging.info("Starting training...")
             for iteration in range(n_iterations):
 
                 batch = batch_generator.next_batch()
@@ -312,7 +319,8 @@ class NNetSBM:
                 sess.run(train_op, feed_dict=batch_dict)
 
                 # analytically
-                self.update_qZ(sess=sess, batch=batch, n_samples=n_samples, debug=debug)
+                self.update_qZ(sess=sess, batch=batch,
+                               n_samples=n_samples, debug=debug)
 
                 # this update to sum_qZ_above was done at the beginning of the iteration. this implementation updates the sum_qZ_above before
                 # logging the intermediate loss functions, and also one more time before saving the model. this actually makes more sense to me.
@@ -320,10 +328,8 @@ class NNetSBM:
                 for k in range(T - 1):
                     sum_qZ_above[:, k] = np.sum(self.qZ_[:, k + 1:], axis=1)
 
-                if iteration % 20 == 0:
+                if iteration % log_interval == 0:
 
-                    print(iteration, end="")
-                    
                     # Add scalar variables to Tensorboard.
                     for summ_str in sess.run(scalar_summaries):
                         writer.add_summary(summ_str, iteration)
@@ -339,15 +345,20 @@ class NNetSBM:
                                                                                            train_elbo: train_elbo_})
                         writer.add_summary(train_ll_summary_str, iteration)
                         writer.add_summary(train_elbo_summary_str, iteration)
-                        print("\tTrain ELBO: %.4f" % train_elbo_, end="")
-                        print("\tTrain LL: %.4f" % train_ll_, end="")
 
-                    if holdout_ratio is not None:
+                    if holdout_ratio_valid is not None:
                         test_dict.update({self.qZ: self.qZ_, self.sum_qZ_above: sum_qZ_above, self.n_samples: 100})
                         test_ll_ = sess.run(self.data_loglikel, feed_dict=test_dict)
                         test_ll_summary_str = sess.run(test_ll_summary, feed_dict={test_ll: test_ll_})
                         writer.add_summary(test_ll_summary_str, iteration)
-                        print("\tTest LL: %.4f" % test_ll_)
+
+                    # Log training overview.
+                    log_str = "%-4d" % iteration
+                    if not no_train_metric:
+                        log_str += "  ELBO: %.4e  Train ll: %.4e" % (train_elbo_, train_ll_)
+                    if holdout_ratio_valid is not None:
+                        log_str += "  Valid ll: %.4e" % test_ll_
+                    logging.info(log_str)
 
             # save the model
             saver.save(sess, os.path.join(root_savedir, "model.ckpt"))
@@ -452,13 +463,14 @@ class NNetSBM:
 
 if __name__ == '__main__':
 
+    from scipy.sparse import find
+    logging.basicConfig(format="%(asctime)s : %(levelname)s : %(message)s", level=logging.INFO)
+
     N = 50
     X = np.random.rand(N, N) < 0.4
-
-    from scipy.sparse import find
     row, col, _ = find(X)
 
-    root_savedir = "~/git_repos/variational-nnet-sbm/saved_sbm"
+    root_savedir = "/Users/onnokampman/git_repos/variational-nnet-sbm/test_savedir"
 
     T = 7
     n_features = 8
@@ -467,8 +479,8 @@ if __name__ == '__main__':
 
     m = NNetSBM()
     m.train(N, row, col, T=T,
-            n_features=n_features, d_pairwise=d_pairwise, hidden_layer_sizes=hidden_layer_sizes,
-            n_iterations=100, batch_size=50, n_samples=6, holdout_ratio=0.1, learning_rate=0.01,
+            n_features=n_features, n_pairwise_features=d_pairwise, hidden_layer_sizes=hidden_layer_sizes,
+            n_iterations=100, batch_size=50, n_samples=6, holdout_ratio_valid=0.1, learning_rate=0.01,
             root_savedir=root_savedir, no_train_metric=False, seed=None, debug=False)
 
-    os.system('~/anaconda3/bin/tensorboard --logdir=' + root_savedir)
+    # os.system('~/anaconda3/bin/tensorboard --logdir=' + root_savedir)
