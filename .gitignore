@@ -3,4 +3,5 @@ __pycache__/
 .idea/
 .ipynb_checkpoints/
 dataset/
+exp/
 savedir/
